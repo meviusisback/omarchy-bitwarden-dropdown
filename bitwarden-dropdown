@@ -173,16 +173,6 @@ pull_into_special() {
   "$TIMEOUT_BIN" -k 1 3 "$HYPRCTL" eval 'local t; for _, w in ipairs(hl.get_windows()) do if w.class == "Bitwarden" then t = w; break end end; if t then hl.dispatch(hl.dsp.window.move({ window = t, workspace = "special:bitwarden" })) end' >/dev/null 2>&1 || true
 }
 
-# Re-assert rule geometry on every show: Electron RESTORES its own saved
-# window size/position after the first map (caught live: rule 70x50% landed,
-# then the window shrank to 875x600). A window rule runs once at first map,
-# so the dropdown must re-place itself on each show (pitfall 14). Mirror of
-# the o.window rule: 70%x50% logical, centered, matching the rule's landed
-# box. Matched by class AND workspace name (class alone is spoofable).
-# Best-effort + bounded (timeout -k 1 3): geometry is cosmetic, never fatal.
-reassert_geometry() {
-  "$TIMEOUT_BIN" -k 1 3 "$HYPRCTL" eval 'local t; for _, w in ipairs(hl.get_windows()) do if w.class == "Bitwarden" and w.workspace and w.workspace.name == "special:bitwarden" then t = w; break end end; if t then local m = t.monitor; local raww = (((m.transform % 2) == 1) and m.height or m.width) / m.scale; local rawh = (((m.transform % 2) == 1) and m.width or m.height) / m.scale; local lw = math.floor(raww + 0.5); local lh = math.floor(rawh + 0.5); local tw = math.floor(lw * 70 / 100 + 0.5); local th = math.floor(lh * 50 / 100 + 0.5); local tx = m.x + math.floor((lw - tw) / 2 + 0.5); local ty = m.y + math.floor((lh - th) / 2 + 0.5); hl.dispatch(hl.dsp.window.resize({ window = t, x = tw, y = th })); hl.dispatch(hl.dsp.window.move({ window = t, x = tx, y = ty })) end' >/dev/null 2>&1 || true
-}
 
 # NOTE: dispatcher form for Hyprland 0.56 Lua engine (legacy
 # `togglespecialworkspace <ws>` fails silently on this build).
@@ -293,7 +283,6 @@ if [ "$PRESENT" = "0" ]; then
   VISIBLE="$(visible_now)"
   if [ "$VISIBLE" = "0" ]; then
     show_ws
-    reassert_geometry
   fi
 else
   if [ "$WSW" != "none" ] && [ "$WSW" != "$WSFULL" ]; then
@@ -303,7 +292,6 @@ else
   fi
   if [ "$VISIBLE" = "0" ]; then
     show_ws              # running but hidden -> show
-    reassert_geometry
   else
     hide_ws              # visible -> hide (verified, bounded retries)
   fi

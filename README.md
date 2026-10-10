@@ -9,8 +9,9 @@ sulla barra oppure `SUPER + SHIFT + B` per mostrarla/nasconderla ovunque tu sia.
   click = toggle, stato rilevato ogni 2s. Non tocca segreti: legge solo
   `VISIBLE=0/1` e non logga mai l'output raw.
 - `hypr/bitwarden.lua` — regola finestra: la classe `Bitwarden` va su
-  `special:bitwarden`, flottante, 70% larghezza x 50% altezza del monitor,
-  centrata sotto la barra.
+  `special:bitwarden`, flottante, centrata sotto la barra. La dimensione NON è
+  forzata: è l'app Bitwarden a decidere la size e adattare il layout (forcing
+  una box fissa 70%x50% tagliava il contenuto in basso).
 - `bitwarden-dropdown` — script di toggle: se l'app gira nascosta la mostra,
   se visibile la nasconde, se non gira la lancia (`/usr/bin/bitwarden-desktop`,
   pacman). Usa la sintassi dispatcher Lua di Hyprland 0.56
