@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/omarchy/omarchy/main/schemas/plugin.json",
+  "schemaVersion": 1,
+  "id": "meviusisback.bitwarden",
+  "name": "Bitwarden dropdown",
+  "version": "1.0.0",
+  "author": "meviusisback",
+  "license": "MIT",
+  "repository": "https://github.com/meviusisback/omarchy-bitwarden-dropdown",
+  "description": "Real Bitwarden desktop app as a dropdown overlay: bar shield icon plus SUPER+SHIFT+B toggle on a special workspace. Login and vault stay inside Bitwarden; the plugin never touches credentials.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Bitwarden",
+    "description": "Toggle the Bitwarden app dropdown (special workspace).",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaults": {
+      "keybind": "SUPER + SHIFT + B"
+    }
+  }
+}

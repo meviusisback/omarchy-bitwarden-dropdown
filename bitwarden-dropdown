@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# bitwarden-dropdown -- toggle the real Bitwarden desktop app as a dropdown overlay.
+#
+# No secrets, no network, no parsing of untrusted data beyond bounded compositor
+# JSON: this script only asks the compositor whether a window with our fixed
+# class exists and shows/hides the special workspace. The Bitwarden app itself
+# owns the login and the vault -- this script never reads vault/credential files.
+#
+# argv-only exec; single fixed class/workspace constants below, never external
+# input. APP_CLASS is a fixed literal validated at authoring time against the
+# host (charset [A-Za-z0-9._-]+), it never flows from argv/env/config.
+set -euo pipefail
+
+APP_CLASS="Bitwarden"           # verified via host hyprctl clients -j under the widget's env -i launch path
+WS="bitwarden"                  # special workspace name (no spaces, fixed)
+LAUNCH="/usr/bin/bitwarden-desktop"  # pacman bitwarden package; absolute path, no PATH lookup
+
+# Fast status path for the bar widget poll (every 2s): fixed absolute binaries
+# only, no command -v, no sleep, no python. Prints exactly one line,
+# VISIBLE=[01]; any failure degrades to VISIBLE=0. /usr/bin/timeout is
+# MANDATORY here (no unbounded fallback): without it the poll could wedge the
+# widget forever, so we fail closed -- exit 1, and the widget's onExited clears
+# the icon state.
+if [ "${1:-toggle}" = "status" ]; then
+  [ -x /usr/bin/timeout ] || exit 1
+  [ -x /usr/bin/hyprctl ] || { printf 'VISIBLE=0\n'; exit 0; }
+  out="$(/usr/bin/timeout 1 /usr/bin/hyprctl monitors -j 2>/dev/null | /usr/bin/head -c 65536)"
+  case "$out" in
+    *'"name":'*'"special:bitwarden"'*) printf 'VISIBLE=1\n' ;;
+    *) printf 'VISIBLE=0\n' ;;
+  esac
+  exit 0
+fi
+
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+
+# Fixed absolute binaries on EVERY path: the widget spawns this script under
+# env -i, so no PATH lookup may happen here (bash would fall back to a compiled
+# default PATH, but an explicit path leaves no room for hijack).
+for _t in /usr/bin/hyprctl /usr/bin/sleep /usr/bin/python3 /usr/bin/timeout \
+          /usr/bin/head /usr/bin/flock; do
+  [ -x "$_t" ] || die "missing trusted tool: $_t"
+done
+HYPRCTL=/usr/bin/hyprctl
+SLEEP=/usr/bin/sleep
+PYTHON3=/usr/bin/python3
+TIMEOUT_BIN=/usr/bin/timeout
+FLOCK=/usr/bin/flock
+
+# Single-flight guard: the keybind runs this script OUTSIDE the widget's QML
+# process, where the widget's busy-latch and watchdog do not exist -- keybind
+# and bar click can race (double launch / show-hide flip). Fail-closed: if the
+# lock is taken another toggle is mid-flight, so do nothing and exit 0.
+# Lockfile lives in the user's private runtime dir (0700 tmpfs).
+[ -n "${XDG_RUNTIME_DIR:-}" ] || die "XDG_RUNTIME_DIR unset"
+LOCK="$XDG_RUNTIME_DIR/bitwarden-dropdown.lock"
+exec 9>"$LOCK" || die "cannot open lock file: $LOCK"
+$FLOCK -n 9 || exit 0
+
+# Bounded compositor read: $1 = deadline seconds (default 2), 64KB cap,
+# failures degrade to empty. hyprctl is local and normally answers in <100ms;
+# the deadline only exists for a wedged compositor.
+hypr_cap() {
+  local dl="${1:-2}"; shift
+  "$TIMEOUT_BIN" "$dl" "$HYPRCTL" "$@" 2>/dev/null | /usr/bin/head -c 65536
+}
+
+# BEGIN PY_SRC
+# The Python helper below is extracted verbatim by tests/test_parsing.py --
+# keep the heredoc markers and the code shape stable.
+read -r -d '' CLIENTS_PY <<'PYEOF' || true
+import json, os, sys
+want = (os.environ.get("APP", "") or "").lower()
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("PRESENT=0 WSW=none")
+    raise SystemExit
+if not isinstance(data, list):
+    print("PRESENT=0 WSW=none")
+    raise SystemExit
+for c in data:
+    if isinstance(c, dict) and str(c.get("class", "") or "").lower() == want:
+        ws = c.get("workspace")
+        wsw = str(ws.get("name", "") or "none") if isinstance(ws, dict) else "none"
+        print("PRESENT=1 WSW=" + wsw)
+        break
+else:
+    print("PRESENT=0 WSW=none")
+PYEOF
+# END PY_SRC
+
+# Exact per-client class match (case-insensitive): PRESENT + the window's
+# workspace in ONE capped clients read. An unanchored glob over the whole JSON
+# would let any window TITLE containing "Bitwarden" spoof PRESENT=1 (the title
+# is attacker-settable); here only the class field of a real client matches.
+# Output: PRESENT=<0|1> WSW=<workspace-name|none>. Any failure -> PRESENT=0.
+clients_state() {
+  APP="$APP_CLASS" hypr_cap 2 clients -j | "$PYTHON3" -c "$CLIENTS_PY" 2>/dev/null \
+    || printf 'PRESENT=0 WSW=none\n'
+}
+
+# Show state of our special workspace: glob over the capped MONITORS read is
+# fine here -- the workspace NAME is ours (fixed constant above), not
+# attacker-settable from inside any window. Output: VISIBLE=<0|1>.
+visible_now() {
+  local mon
+  mon="$(hypr_cap 2 monitors -j)"
+  case "$mon" in
+    *'"name":'*'"special:bitwarden"'*) printf 'VISIBLE=1\n' ;;
+    *) printf 'VISIBLE=0\n' ;;
+  esac
+}
+
+# Pull a stray Bitwarden window (running outside our special workspace) into
+# it. Best-effort: float/size come from the window rule at first map, so a
+# window that was already open keeps its tiling until the app is relaunched.
+# Bounded (timeout 3): a wedged dispatch must never hang the toggle.
+pull_into_special() {
+  "$TIMEOUT_BIN" 3 "$HYPRCTL" eval 'local t; for _, w in ipairs(hl.get_windows()) do if w.class == "Bitwarden" then t = w; break end end; if t then hl.dispatch(hl.dsp.window.move({ window = t, workspace = "special:bitwarden" })) end' >/dev/null 2>&1 || true
+}
+
+# NOTE: dispatcher form for Hyprland 0.56 Lua engine (legacy
+# `togglespecialworkspace <ws>` fails silently on this build).
+# Bounded (timeout 3) and the return code is checked: a rejected or hung
+# dispatch must never read as success.
+toggle_ws() {
+  local out
+  out="$("$TIMEOUT_BIN" 3 "$HYPRCTL" dispatch "hl.dsp.workspace.toggle_special(\"$WS\")" 2>&1)" \
+    || die "toggle dispatch failed: $out"
+}
+
+# Show with verification: a stale monitors read must never flip into a hide.
+show_ws() {
+  local i
+  for i in 1 2 3; do
+    toggle_ws
+    "$SLEEP" 0.4
+    eval "$(visible_now)"
+    [ "$VISIBLE" = "1" ] && return 0
+  done
+  die "could not show the dropdown (still hidden after 3 tries)"
+}
+
+# Hide with verification: retry while a fresh read still says visible.
+hide_ws() {
+  local i
+  for i in 1 2 3; do
+    toggle_ws
+    "$SLEEP" 0.4
+    eval "$(visible_now)"
+    [ "$VISIBLE" = "0" ] && return 0
+  done
+  die "could not hide the dropdown (still visible after 3 tries)"
+}
+
+case "${1:-toggle}" in
+  toggle) ;;
+  *) die "unknown command: $1 (only 'toggle' is supported)" ;;
+esac
+
+eval "$(visible_now)"
+eval "$(clients_state)"
+
+if [ "$PRESENT" = "0" ]; then
+  # Not running: hide a stale empty workspace, then launch fresh (the window
+  # rule places it on special:bitwarden at first map).
+  if [ "$VISIBLE" = "1" ]; then
+    toggle_ws
+    "$SLEEP" 0.3
+  fi
+  [ -x "$LAUNCH" ] || die "cannot launch: $LAUNCH is missing or not executable"
+  "$LAUNCH" >/dev/null 2>&1 &
+  disown || true
+  # Electron cold start measured ~14s on this host: wait up to 20s with ONE
+  # capped clients read per iteration (worst case ~40 x 1.5s = 60s under a
+  # degraded compositor -- the widget watchdog is sized above that).
+  local_i=0
+  for ((local_i = 0; local_i < 40; local_i++)); do
+    "$SLEEP" 0.5
+    eval "$(clients_state)"
+    [ "$PRESENT" = "1" ] && break
+  done
+  if [ "$PRESENT" = "0" ]; then
+    # NEVER hard-die here: Bitwarden with "close to tray" keeps running
+    # without a mapped window, and a relaunch would do nothing. Warn and
+    # succeed -- the README documents disabling close-to-tray.
+    printf 'bitwarden-dropdown: launched %s but no window within 20s (close-to-tray enabled?)\n' "$LAUNCH" >&2
+    exit 0
+  fi
+  # Show only if still hidden: a fast window may arrive already visible, and
+  # an unconditional show would hide-then-reshow it (flicker).
+  [ "$VISIBLE" = "0" ] && show_ws
+else
+  if [ "$WSW" != "none" ] && [ "$WSW" != "special:$WS" ]; then
+    pull_into_special
+    "$SLEEP" 0.3
+    eval "$(visible_now)"
+  fi
+  if [ "$VISIBLE" = "0" ]; then
+    show_ws              # running but hidden -> show
+  else
+    hide_ws              # visible -> hide (verified, bounded retries)
+  fi
+fi
