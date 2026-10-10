@@ -251,10 +251,26 @@ class TestHostileFixtures(unittest.TestCase):
 
     def test_oversized_but_valid(self):
         """10k clients, match at the end — bounded work, correct result."""
-        fixture = [client(cls="foot", ws=i) for i in range(10000)]
-        fixture.append(client(cls="Bitwarden", ws=7))
-        out, _ = run_clients(fixture)
+        with tempfile.TemporaryDirectory() as root:
+            make_proc_fixture(root, 4242, b"/usr/lib/electron39/electron /usr/lib/bitwarden/app.asar\x00")
+            fixture = [client(cls="foot", ws=i) for i in range(10000)]
+            fixture.append(client(cls="Bitwarden", ws=7, pid=4242))
+            out, _ = run_clients(fixture, proc_root=root)
         self.assertEqual(out, "1 7")
+
+    def test_pid_anomaly_fails_closed(self):
+        """A class=Bitwarden client with a bogus/absent pid must be SKIPPED
+        (fail closed), never trusted on class alone (round-2 fix)."""
+        with tempfile.TemporaryDirectory() as root:
+            make_proc_fixture(root, 4242, b"/usr/lib/electron39/electron /usr/lib/bitwarden/app.asar\x00")
+            for bogus in [None, 0, 1, -1, "abc", [4242]]:
+                out, _ = run_clients([client(pid=bogus)], proc_root=root)
+                self.assertEqual(out, "0 none", f"pid {bogus!r} not failed-closed")
+
+    def test_missing_pid_fails_closed(self):
+        """No pid key at all -> skip (the /proc check cannot run)."""
+        out, _ = run_clients([client()])  # client() has no pid by default
+        self.assertEqual(out, "0 none")
 
     def test_unicode_title_does_not_match(self):
         out, _ = run_clients([client(cls="kitty", title="Bitwarden \U0001F510 password")])
@@ -313,6 +329,12 @@ class TestMonitorsVisibility(unittest.TestCase):
         m = monitor()
         m["specialWorkspace"] = "special:bitwarden"
         out, _ = run_monitors([m])
+        self.assertEqual(out, "0")
+
+    def test_empty_wsfull_fails_closed(self):
+        """WSFULL empty must match nothing — a hidden monitor (name='') must
+        NOT read as VISIBLE=1 (round-2 symmetry fix)."""
+        out, _ = run_monitors([monitor(special_id=0, special_name="")], wsfull="")
         self.assertEqual(out, "0")
 
 

@@ -115,15 +115,17 @@ Panel {
     }
   }
 
-  // Watchdog: worst legitimate toggle under a DEGRADED compositor is ~106s
-  // (Electron launch wait up to ~90s worst: 60 iters x (0.5s sleep + 1s capped
-  // read bounded by timeout -k) + show retries ~13s + geometry ~3s). Measured
-  // healthy runtime is ~30s for a cold launch, <1s for hide/show. Past 120s
-  // the action is treated as stuck: terminate it and recover instead of
-  // leaving the button disabled with polling suspended.
+  // Watchdog: worst LEGITIMATE toggle under a DEGRADED compositor is ~182s.
+  // Each hypr_cap 1 (timeout -k 1 1) bounds a child at ~2s (SIGTERM at 1s +
+  // SIGKILL after 1s for a TERM-ignoring hyprctl), so the Electron launch
+  // wait alone is ~60 x 2.5 = 150s, plus pre/post-loop work + show retries +
+  // geometry (~32s). Measured healthy runtime is ~30s cold, <1s hide/show.
+  // Past 200s the action is treated as stuck: terminate it and recover instead
+  // of leaving the button disabled with polling suspended. (The blind window
+  // only reaches 200s if the compositor is genuinely wedged.)
   Timer {
     id: toggleWatchdog
-    interval: 120000
+    interval: 200000
     repeat: false
     running: root.busy
     onTriggered: {

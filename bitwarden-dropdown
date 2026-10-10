@@ -24,7 +24,7 @@ LAUNCH="/usr/bin/bitwarden-desktop"   # pacman bitwarden package; absolute path,
 # runs identically and hermetically. The marker prevents an infinite loop.
 # Residual: values we pass through are visible in /proc cmdline to local users;
 # the runtime socket dir (0700) is the real boundary, and no secrets pass here.
-if [ "${BITWARDEN_DROPDOWN_CLEAN:-}" != "1" ]; then
+if [ "${BITWARDEN_DROPDOWN_CLEAN:-}" != "1" ] || [ "${PATH:-}" != "/usr/bin" ]; then
   exec /usr/bin/env -i \
     BITWARDEN_DROPDOWN_CLEAN=1 \
     HOME="${HOME:-}" \
@@ -85,12 +85,15 @@ for c in data:
         continue
     pid = c.get("pid")
     try:
-        with open("%s/%d/cmdline" % (proc_root, int(pid)), "rb") as fh:
+        pid_i = int(pid)
+        if pid_i <= 1:
+            continue  # fail closed: a bogus pid must not fall through to trust class
+        with open("%s/%d/cmdline" % (proc_root, pid_i), "rb") as fh:
             cl = fh.read(4096).replace(b"\x00", b" ").lower()
         if b"bitwarden" not in cl:
             continue  # class spoof: a different app masquerading as Bitwarden
-    except Exception:
-        pass  # unreadable /proc (shouldn't happen same-user): degrade, trust class
+    except (OSError, ValueError, TypeError):
+        continue  # fail closed: any pid/proc anomaly -> skip, never trust class
     ws = c.get("workspace")
     wsw = str(ws.get("name", "")) if isinstance(ws, dict) else "none"
     print("1 " + safe_wsw(wsw)); raise SystemExit
@@ -105,6 +108,8 @@ PYEOF
 read -r -d '' MONITORS_PY <<'PYEOF' || true
 import json, os, sys
 want = os.environ.get("WSFULL", "")
+if not want:
+    print("0"); raise SystemExit  # fail closed: empty WSFULL must match nothing
 try:
     data = json.load(sys.stdin)
 except Exception:
@@ -132,18 +137,33 @@ hypr_cap() {
 }
 
 # PRESENT + the window's workspace in ONE capped clients read. Output exactly
-# two tokens consumed via `read` (no eval). Any failure -> "0 none".
+# two tokens (consumed via `read`). We capture python's stdout and take its
+# FIRST line, then validate to the expected shape, so a pipefail-triggered
+# pipeline (hyprctl nonzero while python still printed) can never stack a
+# second fallback line onto the result (caught in round 2: `0\n0` broke the
+# exact-match consumers). Any failure -> "0 none".
 clients_state() {
-  hypr_cap 1 clients -j \
-    | APP="$APP_CLASS" PROC_ROOT="${PROC_ROOT:-/proc}" "$PYTHON3" -I -E -s -c "$CLIENTS_PY" 2>/dev/null \
-    || printf '0 none\n'
+  local out
+  out="$(hypr_cap 1 clients -j | APP="$APP_CLASS" PROC_ROOT="${PROC_ROOT:-/proc}" "$PYTHON3" -I -E -s -c "$CLIENTS_PY" 2>/dev/null || true)"
+  out="${out%%$'\n'*}"
+  case "$out" in
+    "1 "*) printf '%s\n' "$out" ;;
+    *) printf '0 none\n' ;;
+  esac
 }
 
 # VISIBLE via structural specialWorkspace parse of the capped monitors read.
-# Output exactly "0" or "1". Any failure -> "0" (fail closed to hidden).
+# Output exactly "0" or "1". Same single-line discipline as clients_state
+# (first line only, validated), so a pipefail double-output is impossible.
+# Any failure -> "0" (fail closed to hidden).
 visible_now() {
-  hypr_cap 1 monitors -j | WSFULL="$WSFULL" "$PYTHON3" -I -E -s -c "$MONITORS_PY" 2>/dev/null \
-    || printf '0\n'
+  local out
+  out="$(hypr_cap 1 monitors -j | WSFULL="$WSFULL" "$PYTHON3" -I -E -s -c "$MONITORS_PY" 2>/dev/null || true)"
+  out="${out%%$'\n'*}"
+  case "$out" in
+    1) printf '1\n' ;;
+    *) printf '0\n' ;;
+  esac
 }
 
 # Pull a stray Bitwarden window (running outside our special workspace) into
@@ -231,7 +251,7 @@ LOCK="$XDG_RUNTIME_DIR/bitwarden-dropdown.lock"
 exec 9>>"$LOCK" || die "cannot open lock: $LOCK"
 $FLOCK -n 9 || exit 0
 
-read -r PRESENT WSW < <(clients_state) || { PRESENT=0; WSW=none; }
+read -r PRESENT WSW < <(clients_state 9>&-) || { PRESENT=0; WSW=none; }
 VISIBLE="$(visible_now)"
 
 if [ "$PRESENT" = "0" ]; then
@@ -249,12 +269,14 @@ if [ "$PRESENT" = "0" ]; then
   disown || true
   # Electron cold start measured 14-30s on this host: wait up to 30s (60 x
   # 0.5s sleeps) with ONE capped clients read per iteration. Worst case under
-  # a wedged compositor is bounded by `timeout -k 1 1` per read (~90s wall
-  # clock for the loop), which the QML watchdog (120s) sits above.
+  # a wedged compositor: each `hypr_cap 1` (timeout -k 1 1) bounds a child at
+  # ~2s (SIGTERM at 1s + SIGKILL after 1s), so the loop is ~60 x 2.5 = 150s;
+  # with the pre/post-loop work the true worst legitimate toggle is ~182s,
+  # which the QML watchdog (200s) sits above.
   local_i=0
   for ((local_i = 0; local_i < 60; local_i++)); do
     "$SLEEP" 0.5
-    read -r PRESENT WSW < <(clients_state) || { PRESENT=0; WSW=none; }
+    read -r PRESENT WSW < <(clients_state 9>&-) || { PRESENT=0; WSW=none; }
     [ "$PRESENT" = "1" ] && break
   done
   if [ "$PRESENT" = "0" ]; then

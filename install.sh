@@ -39,16 +39,18 @@ HOOK_DO="do local path = (os.getenv(\"XDG_CONFIG_HOME\") or os.getenv(\"HOME\") 
 # Absolute tool paths (poisoned-PATH hardening, matches the toggle script).
 for _t in /usr/bin/hyprctl /usr/bin/sleep /usr/bin/python3 /usr/bin/bash \
           /usr/bin/dirname /usr/bin/install /usr/bin/cmp /usr/bin/mkdir \
-          /usr/bin/grep /usr/bin/cp /usr/bin/rm /usr/bin/head; do
+          /usr/bin/grep /usr/bin/cp /usr/bin/rm /usr/bin/head /usr/bin/tail \
+          /usr/bin/timeout; do
   [ -x "$_t" ] || die "missing trusted tool: $_t"
 done
 HYPRCTL=/usr/bin/hyprctl
 SLEEP=/usr/bin/sleep
 PYTHON3=/usr/bin/python3
+TIMEOUT_BIN=/usr/bin/timeout
 
 # Bounded, capped compositor reads for install/uninstall (a wedged or verbose
 # compositor must never hang the installer or buffer unbounded output).
-hypr_out() { "$HYPRCTL" "$@" 2>/dev/null | /usr/bin/head -c 65536 || true; }
+hypr_out() { "$TIMEOUT_BIN" -k 1 5 "$HYPRCTL" "$@" 2>/dev/null | /usr/bin/head -c 65536 || true; }
 
 # Refuse symlinked write targets (an append/copy through a planted link lands
 # elsewhere). Checks the file and its parent dir; call BEFORE any write.
@@ -61,17 +63,17 @@ refuse_link() {
 
 # Ensure the file ends with a newline before we append a block (otherwise the
 # BEGIN marker glues onto the last line and uninstall can never match it).
+# Tests the LAST byte: `tail -c1` prints nothing (empty) iff the file already
+# ends with a newline.
 ensure_trailing_newline() {
   local f="$1"
   [ -s "$f" ] || return 0
-  [ "$(/usr/bin/head -c 1 "$f" | /usr/bin/wc -l)" -eq 0 ] || return 0
-  # head -c1 of a file ending in newline yields "\n" (wc -l == 1); no newline -> 0.
-  printf '\n' >> "$f"
+  [ -z "$(/usr/bin/tail -c 1 "$f")" ] || printf '\n' >> "$f"
 }
 
 do_install() {
   "$PYTHON3" -m py_compile /dev/null 2>/dev/null || true  # no-op; python present
-  bash -n "$REPO_DIR/bitwarden-dropdown" || die "toggle script has syntax errors"
+  /usr/bin/bash -n "$REPO_DIR/bitwarden-dropdown" || die "toggle script has syntax errors"
   # Pre-check everything first: a missing config must abort BEFORE partial writes.
   for f in "$HYPR_LUA" "$BIND_LUA"; do
     [ -f "$f" ] || die "missing config (nothing written): $f"
@@ -106,16 +108,16 @@ do_install() {
   fi
   # Reload is best-effort: on hosts without a live Hyprland (SSH/TTY) it fails,
   # and that must NOT abort an otherwise-good install (writes already landed).
-  "$HYPRCTL" reload >/dev/null 2>&1 \
+  "$TIMEOUT_BIN" -k 1 5 "$HYPRCTL" reload >/dev/null 2>&1 \
     || msg "warning: hyprctl reload failed (Hyprland unreachable?) - configs written, reload manually"
   "$SLEEP" 1
   errs="$(hypr_out configerrors)"
   [ -z "$errs" ] || msg "warning: hyprctl configerrors reports: $errs"
   # Harmless dispatcher probe: wrong form must error NOW (exit code checked),
   # right form is a no-op toggled straight back. Warning only.
-  "$HYPRCTL" dispatch 'hl.dsp.workspace.toggle_special("zzz-no-such")' >/dev/null 2>&1 \
+  "$TIMEOUT_BIN" -k 1 5 "$HYPRCTL" dispatch 'hl.dsp.workspace.toggle_special("zzz-no-such")' >/dev/null 2>&1 \
     || msg "warning: dispatcher probe failed (Hyprland unreachable or non-Lua build?)"
-  "$HYPRCTL" dispatch 'hl.dsp.workspace.toggle_special("zzz-no-such")' >/dev/null 2>&1 \
+  "$TIMEOUT_BIN" -k 1 5 "$HYPRCTL" dispatch 'hl.dsp.workspace.toggle_special("zzz-no-such")' >/dev/null 2>&1 \
     || msg "warning: dispatcher probe failed on toggle-back"
   # Single-occurrence assert: exactly one Bitwarden bind must exist after
   # install (a duplicate would toggle twice per keypress). hyprctl binds
@@ -204,7 +206,7 @@ print("hook lines removed:", rewrite(hook_path, lambda ln: ln.strip() not in hoo
 PYEOF
   # Only delete the binary + rule AFTER the configs validated/rewrote cleanly.
   /usr/bin/rm -f "$BIN_DST" "$RULES_DST"
-  "$HYPRCTL" reload >/dev/null 2>&1 \
+  "$TIMEOUT_BIN" -k 1 5 "$HYPRCTL" reload >/dev/null 2>&1 \
     || msg "warning: hyprctl reload failed (Hyprland unreachable?) - reload manually"
   msg "Uninstalled."
 }
