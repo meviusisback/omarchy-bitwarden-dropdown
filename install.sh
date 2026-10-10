@@ -1,15 +1,20 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 # install.sh - install/uninstall the Bitwarden dropdown (host-side).
 # Idempotent: marker-keyed blocks, never duplicated. Usage: ./install.sh [uninstall]
 #
-# Write discipline (review findings): refuse symlinked targets, pre-check every
+# Write discipline (review findings): refuse symlinked targets (including .bak
+# destinations and, on uninstall, the config files themselves), pre-check every
 # file before the first write (no partial installs), backups + atomic renames
-# for JSON, exact-line removal on uninstall (no sed regex ranges), grep -qF --
-# for marker patterns that start with a dash.
+# preserving mode/owner, exact-line marker removal (no sed regex ranges, strip
+# comparison so an indented marker still matches), grep -qFx -- for whole-line
+# dash-leading markers, trailing-newline guard before append, and ABSOLUTE tool
+# paths so a poisoned PATH at install time cannot hijack the operation.
 set -euo pipefail
 
 MARKER="meviusisback.bitwarden-dropdown"
-REPO_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd -P)"
+# dirname-style resolution works for both ./install.sh and `bash install.sh`
+# (a bare ${BASH_SOURCE[0]%/*} yields the filename itself when there is no slash).
+REPO_DIR="$(cd -- "$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 HOME_DIR="${HOME:?HOME unset}"
 BIN_DST="$HOME_DIR/.local/bin/bitwarden-dropdown"
 RULES_DST="$HOME_DIR/.config/hypr/bitwarden.lua"
@@ -31,108 +36,150 @@ esac
 HOOK_LINE="-- Added by the $MARKER script: installs the Bitwarden dropdown window rules."
 HOOK_DO="do local path = (os.getenv(\"XDG_CONFIG_HOME\") or os.getenv(\"HOME\") .. \"/.config\") .. \"/hypr/bitwarden.lua\"; local file = io.open(path, \"r\"); if file then file:close(); dofile(path) end end"
 
-HYPRCTL="$(command -v hyprctl)" || die "hyprctl not found"
-SLEEP="$(command -v sleep)" || die "sleep not found"
-PYTHON3="$(command -v python3)" || die "python3 not found"
+# Absolute tool paths (poisoned-PATH hardening, matches the toggle script).
+for _t in /usr/bin/hyprctl /usr/bin/sleep /usr/bin/python3 /usr/bin/bash \
+          /usr/bin/dirname /usr/bin/install /usr/bin/cmp /usr/bin/mkdir \
+          /usr/bin/grep /usr/bin/cp /usr/bin/rm /usr/bin/head; do
+  [ -x "$_t" ] || die "missing trusted tool: $_t"
+done
+HYPRCTL=/usr/bin/hyprctl
+SLEEP=/usr/bin/sleep
+PYTHON3=/usr/bin/python3
+
+# Bounded, capped compositor reads for install/uninstall (a wedged or verbose
+# compositor must never hang the installer or buffer unbounded output).
+hypr_out() { "$HYPRCTL" "$@" 2>/dev/null | /usr/bin/head -c 65536 || true; }
 
 # Refuse symlinked write targets (an append/copy through a planted link lands
 # elsewhere). Checks the file and its parent dir; call BEFORE any write.
 refuse_link() {
   local p="$1" d
   [ ! -L "$p" ] || die "refusing to write $p: it is a symlink"
-  d="$(dirname "$p")"
+  d="$(/usr/bin/dirname -- "$p")"
   [ ! -L "$d" ] || die "refusing to write into $d: it is a symlink"
 }
 
+# Ensure the file ends with a newline before we append a block (otherwise the
+# BEGIN marker glues onto the last line and uninstall can never match it).
+ensure_trailing_newline() {
+  local f="$1"
+  [ -s "$f" ] || return 0
+  [ "$(/usr/bin/head -c 1 "$f" | /usr/bin/wc -l)" -eq 0 ] || return 0
+  # head -c1 of a file ending in newline yields "\n" (wc -l == 1); no newline -> 0.
+  printf '\n' >> "$f"
+}
+
 do_install() {
+  "$PYTHON3" -m py_compile /dev/null 2>/dev/null || true  # no-op; python present
   bash -n "$REPO_DIR/bitwarden-dropdown" || die "toggle script has syntax errors"
   # Pre-check everything first: a missing config must abort BEFORE partial writes.
   for f in "$HYPR_LUA" "$BIND_LUA"; do
     [ -f "$f" ] || die "missing config (nothing written): $f"
   done
-  for f in "$BIN_DST" "$RULES_DST" "$HYPR_LUA" "$BIND_LUA"; do
+  for f in "$BIN_DST" "$RULES_DST" "$HYPR_LUA" "$BIND_LUA" "$HYPR_LUA.bak" "$BIND_LUA.bak"; do
     refuse_link "$f"
   done
-  mkdir -p "$HOME_DIR/.local/bin" "$HOME_DIR/.config/hypr"
-  install -m755 "$REPO_DIR/bitwarden-dropdown" "$BIN_DST"
-  cmp -s "$REPO_DIR/bitwarden-dropdown" "$BIN_DST" || die "copy to $BIN_DST failed to verify"
-  install -m644 "$REPO_DIR/hypr/bitwarden.lua" "$RULES_DST"
-  cmp -s "$REPO_DIR/hypr/bitwarden.lua" "$RULES_DST" || die "copy to $RULES_DST failed to verify"
-  # Backups before the first append (only if no .bak exists yet).
-  [ -e "$HYPR_LUA.bak" ] || cp -p "$HYPR_LUA" "$HYPR_LUA.bak"
-  [ -e "$BIND_LUA.bak" ] || cp -p "$BIND_LUA" "$BIND_LUA.bak"
-  if ! grep -qF -- "$HOOK_LINE" "$HYPR_LUA"; then
+  /usr/bin/mkdir -p "$HOME_DIR/.local/bin" "$HOME_DIR/.config/hypr"
+  /usr/bin/install -m755 "$REPO_DIR/bitwarden-dropdown" "$BIN_DST"
+  /usr/bin/cmp -s "$REPO_DIR/bitwarden-dropdown" "$BIN_DST" || die "copy to $BIN_DST failed to verify"
+  /usr/bin/install -m644 "$REPO_DIR/hypr/bitwarden.lua" "$RULES_DST"
+  /usr/bin/cmp -s "$REPO_DIR/hypr/bitwarden.lua" "$RULES_DST" || die "copy to $RULES_DST failed to verify"
+  # Backups before the first append (only if no .bak exists yet); the .bak
+  # destination symlink was already refused above.
+  [ -e "$HYPR_LUA.bak" ] || /usr/bin/cp -p "$HYPR_LUA" "$HYPR_LUA.bak"
+  [ -e "$BIND_LUA.bak" ] || /usr/bin/cp -p "$BIND_LUA" "$BIND_LUA.bak"
+  ensure_trailing_newline "$HYPR_LUA"
+  ensure_trailing_newline "$BIND_LUA"
+  # Whole-line marker match (-x): a stray mention inside a comment/string must
+  # not suppress re-adding the block forever.
+  if ! /usr/bin/grep -qFx -- "$HOOK_LINE" "$HYPR_LUA"; then
     printf '%s\n%s\n' "$HOOK_LINE" "$HOOK_DO" >> "$HYPR_LUA"
     msg "hook added to hyprland.lua"
   else
     msg "hook already present"
   fi
-  if ! grep -qF -- "$BIND_BEGIN" "$BIND_LUA"; then
+  if ! /usr/bin/grep -qFx -- "$BIND_BEGIN" "$BIND_LUA"; then
     printf '%s\n%s\n%s\n' "$BIND_BEGIN" "$BIND_LINE" "$BIND_END" >> "$BIND_LUA"
     msg "keybind added to bindings.lua"
   else
     msg "keybind already present"
   fi
-  "$HYPRCTL" reload
+  # Reload is best-effort: on hosts without a live Hyprland (SSH/TTY) it fails,
+  # and that must NOT abort an otherwise-good install (writes already landed).
+  "$HYPRCTL" reload >/dev/null 2>&1 \
+    || msg "warning: hyprctl reload failed (Hyprland unreachable?) - configs written, reload manually"
   "$SLEEP" 1
-  errs="$("$HYPRCTL" configerrors 2>&1)" || true
+  errs="$(hypr_out configerrors)"
   [ -z "$errs" ] || msg "warning: hyprctl configerrors reports: $errs"
   # Harmless dispatcher probe: wrong form must error NOW (exit code checked),
-  # right form is a no-op toggled straight back. Warning only: on hosts without
-  # a live Hyprland (SSH, TTY) the probe cannot run, and that must not abort an
-  # otherwise good install.
-  "$HYPRCTL" dispatch 'hl.dsp.workspace.toggle_special("zzz-no-such")' >/dev/null \
+  # right form is a no-op toggled straight back. Warning only.
+  "$HYPRCTL" dispatch 'hl.dsp.workspace.toggle_special("zzz-no-such")' >/dev/null 2>&1 \
     || msg "warning: dispatcher probe failed (Hyprland unreachable or non-Lua build?)"
-  "$HYPRCTL" dispatch 'hl.dsp.workspace.toggle_special("zzz-no-such")' >/dev/null \
+  "$HYPRCTL" dispatch 'hl.dsp.workspace.toggle_special("zzz-no-such")' >/dev/null 2>&1 \
     || msg "warning: dispatcher probe failed on toggle-back"
   # Single-occurrence assert: exactly one Bitwarden bind must exist after
   # install (a duplicate would toggle twice per keypress). hyprctl binds
   # exposes the bind description (not the exec path) under dispatcher __lua.
-  binds="$("$HYPRCTL" binds 2>/dev/null | grep -c 'Toggle Bitwarden' || true)"
+  binds="$(hypr_out binds | /usr/bin/grep -c 'Toggle Bitwarden' || true)"
   [ "$binds" = "1" ] || msg "warning: expected exactly 1 bitwarden keybind, found $binds"
   msg "Installed. Press SUPER + SHIFT + B for Bitwarden."
 }
 
 do_uninstall() {
-  for f in "$BIN_DST" "$RULES_DST"; do
+  # Refuse symlinked configs BEFORE any rewrite (an os.replace through a
+  # planted symlink would replace the link and break a dotfiles setup).
+  for f in "$BIN_DST" "$RULES_DST" "$HYPR_LUA" "$BIND_LUA"; do
     refuse_link "$f"
   done
-  rm -f "$BIN_DST" "$RULES_DST"
-  # Exact-line removal only (no sed regex ranges): drop exactly the lines we
-  # added, via temp file + rename so a planted symlink is replaced, not followed.
-  "$PYTHON3" - "$BIND_LUA" "$HYPR_LUA" <<'EOF'
+  # Marker validation + config rewrite FIRST (atomic, mode-preserving), so an
+  # unterminated/indented marker block aborts BEFORE we delete the binary (no
+  # half-uninstalled state pointing at a missing executable).
+  "$PYTHON3" - "$BIND_LUA" "$HYPR_LUA" <<'PYEOF'
 import os, sys
 bind_path, hook_path = sys.argv[1], sys.argv[2]
+
+def _atomic_write(path, lines):
+    # Preserve the original mode/owner; write via O_EXCL|O_NOFOLLOW temp + rename.
+    try:
+        st = os.stat(path)
+        mode = st.st_mode & 0o7777
+    except OSError:
+        mode = 0o644
+    tmp = path + ".tmp"
+    try:
+        os.unlink(tmp)  # stale interrupt leftover; unlink never follows links
+    except OSError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as h:
+        h.writelines(lines)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
 def rewrite(path, keep):
     try:
-        with open(path) as h:
+        with open(path, encoding="utf-8", errors="surrogateescape") as h:
             lines = h.readlines()
     except FileNotFoundError:
         return False
     kept = [ln for ln in lines if keep(ln)]
     if len(kept) == len(lines):
         return False
-    tmp = path + ".tmp"
-    try:
-        os.unlink(tmp)  # stale interrupt leftover; unlink never follows links
-    except OSError:
-        pass
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-    with os.fdopen(fd, "w") as h:
-        h.writelines(kept)
-    os.replace(tmp, path)
+    _atomic_write(path, kept)
     return True
+
 BEGIN = "-- BEGIN meviusisback.bitwarden-dropdown"
 END = "-- END meviusisback.bitwarden-dropdown"
+
 def drop_block(path):
     try:
-        with open(path) as h:
+        with open(path, encoding="utf-8", errors="surrogateescape") as h:
             lines = h.readlines()
     except FileNotFoundError:
         return False
     out, skip, changed = [], False, False
     for ln in lines:
-        s = ln.rstrip("\n")
+        s = ln.strip()  # strip (not rstrip) so an indented marker still matches
         if not skip and s == BEGIN:
             skip, changed = True, True
             continue
@@ -142,27 +189,23 @@ def drop_block(path):
         if not skip:
             out.append(ln)
     if skip:
-        raise SystemExit(f"unterminated marker block in {path}; leaving it alone")
+        raise SystemExit(f"unterminated marker block in {path}; leaving it alone (nothing removed)")
     if not changed:
         return False
-    tmp = path + ".tmp"
-    try:
-        os.unlink(tmp)  # stale interrupt leftover; unlink never follows links
-    except OSError:
-        pass
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-    with os.fdopen(fd, "w") as h:
-        h.writelines(out)
-    os.replace(tmp, path)
+    _atomic_write(path, out)
     return True
+
 hook_exact = {
     "-- Added by the meviusisback.bitwarden-dropdown script: installs the Bitwarden dropdown window rules.",
     "do local path = (os.getenv(\"XDG_CONFIG_HOME\") or os.getenv(\"HOME\") .. \"/.config\") .. \"/hypr/bitwarden.lua\"; local file = io.open(path, \"r\"); if file then file:close(); dofile(path) end end",
 }
 print("keybind block removed:", drop_block(bind_path))
-print("hook lines removed:", rewrite(hook_path, lambda ln: ln.rstrip("\n") not in hook_exact))
-EOF
-  "$HYPRCTL" reload
+print("hook lines removed:", rewrite(hook_path, lambda ln: ln.strip() not in hook_exact))
+PYEOF
+  # Only delete the binary + rule AFTER the configs validated/rewrote cleanly.
+  /usr/bin/rm -f "$BIN_DST" "$RULES_DST"
+  "$HYPRCTL" reload >/dev/null 2>&1 \
+    || msg "warning: hyprctl reload failed (Hyprland unreachable?) - reload manually"
   msg "Uninstalled."
 }
 

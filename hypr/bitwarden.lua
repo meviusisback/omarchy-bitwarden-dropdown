@@ -1,7 +1,11 @@
 -- BEGIN meviusisback.bitwarden-dropdown (generated; do not edit)
 -- Bitwarden as a dropdown overlay on its own special workspace.
--- The rule only applies at the window's first map; the toggle script below
--- just shows/hides special:bitwarden, so geometry stays as placed here.
+-- The rule places the window at first map (70%x50% logical, centered). The
+-- toggle script re-asserts this geometry on every show because Electron
+-- restores its own saved size/position after the first map.
+-- NOTE: move={"center","36"}'s y is effectively inert here (the window lands
+-- vertically centered, matching the script's reassert); kept for parity with
+-- the ente-auth template.
 o.window("Bitwarden", {
   workspace = "special:bitwarden",
   float = true,

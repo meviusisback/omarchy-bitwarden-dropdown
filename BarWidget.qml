@@ -28,9 +28,10 @@ Panel {
 
   function scriptPath() {
     // bitwarden-dropdown ships next to this file inside the plugin folder.
-    // plugin dir comes from `omarchy plugin add` (fixed path, no spaces), so
-    // plain file:// stripping is enough; no percent-decoding layer.
-    return Qt.resolvedUrl("bitwarden-dropdown").toString().replace(/^file:\/\//, "")
+    // plugin dir comes from `omarchy plugin add` (fixed path, no spaces).
+    // decodeURIComponent handles a path containing space/#/% (Qt.resolvedUrl
+    // percent-encodes); stripping file:// alone would produce a wrong path.
+    return decodeURIComponent(Qt.resolvedUrl("bitwarden-dropdown").toString()).replace(/^file:\/\//, "")
   }
 
   // Every automatic process starts with a CLEARED environment plus an explicit
@@ -77,8 +78,10 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         // Strict shape only: anything else fails closed to inactive, and the
-        // raw output is never logged or rendered anywhere.
-        const line = (text || "").trim()
+        // raw output is never logged or rendered anywhere. Cap the read before
+        // comparing (defence-in-depth: the script prints one line by design,
+        // but an unexpected child must never grow an unbounded buffer).
+        const line = (text || "").trim().slice(0, 64)
         root.appVisible = (line === "VISIBLE=1")
       }
     }
@@ -112,14 +115,15 @@ Panel {
     }
   }
 
-  // Watchdog: worst legitimate toggle under a degraded compositor is ~70s
-  // (Electron launch wait ~60s worst case + bounded snapshot reads + show
-  // retries with dispatch timeouts). Past 90s the action is treated as stuck:
-  // terminate it and recover instead of leaving the button disabled with
-  // polling suspended.
+  // Watchdog: worst legitimate toggle under a DEGRADED compositor is ~106s
+  // (Electron launch wait up to ~90s worst: 60 iters x (0.5s sleep + 1s capped
+  // read bounded by timeout -k) + show retries ~13s + geometry ~3s). Measured
+  // healthy runtime is ~30s for a cold launch, <1s for hide/show. Past 120s
+  // the action is treated as stuck: terminate it and recover instead of
+  // leaving the button disabled with polling suspended.
   Timer {
     id: toggleWatchdog
-    interval: 90000
+    interval: 120000
     repeat: false
     running: root.busy
     onTriggered: {
