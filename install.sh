@@ -86,8 +86,9 @@ do_install() {
   "$HYPRCTL" dispatch 'hl.dsp.workspace.toggle_special("zzz-no-such")' >/dev/null \
     || msg "warning: dispatcher probe failed on toggle-back"
   # Single-occurrence assert: exactly one Bitwarden bind must exist after
-  # install (a duplicate would toggle twice per keypress).
-  binds="$("$HYPRCTL" binds 2>/dev/null | grep -c 'bitwarden-dropdown' || true)"
+  # install (a duplicate would toggle twice per keypress). hyprctl binds
+  # exposes the bind description (not the exec path) under dispatcher __lua.
+  binds="$("$HYPRCTL" binds 2>/dev/null | grep -c 'Toggle Bitwarden' || true)"
   [ "$binds" = "1" ] || msg "warning: expected exactly 1 bitwarden keybind, found $binds"
   msg "Installed. Press SUPER + SHIFT + B for Bitwarden."
 }

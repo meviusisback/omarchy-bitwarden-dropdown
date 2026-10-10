@@ -96,7 +96,7 @@ PYEOF
 # is attacker-settable); here only the class field of a real client matches.
 # Output: PRESENT=<0|1> WSW=<workspace-name|none>. Any failure -> PRESENT=0.
 clients_state() {
-  APP="$APP_CLASS" hypr_cap 2 clients -j | "$PYTHON3" -c "$CLIENTS_PY" 2>/dev/null \
+  hypr_cap 2 clients -j | APP="$APP_CLASS" "$PYTHON3" -c "$CLIENTS_PY" 2>/dev/null \
     || printf 'PRESENT=0 WSW=none\n'
 }
 
@@ -118,6 +118,17 @@ visible_now() {
 # Bounded (timeout 3): a wedged dispatch must never hang the toggle.
 pull_into_special() {
   "$TIMEOUT_BIN" 3 "$HYPRCTL" eval 'local t; for _, w in ipairs(hl.get_windows()) do if w.class == "Bitwarden" then t = w; break end end; if t then hl.dispatch(hl.dsp.window.move({ window = t, workspace = "special:bitwarden" })) end' >/dev/null 2>&1 || true
+}
+
+# Re-assert rule geometry on every show: Electron RESTORES its own saved
+# window size/position after the first map (caught live: rule 70x50% landed,
+# then the window shrank to 875x600). A window rule runs once at first map,
+# so the dropdown must re-place itself on each show (pitfall 14). Mirror of
+# the o.window rule: 70%x50% logical, centered, matching the rule's landed
+# box. Matched by class AND workspace name (class alone is spoofable).
+# Best-effort + bounded (timeout 3): geometry is cosmetic, never fatal.
+reassert_geometry() {
+  "$TIMEOUT_BIN" 3 "$HYPRCTL" eval 'local t; for _, w in ipairs(hl.get_windows()) do if w.class == "Bitwarden" and w.workspace and w.workspace.name == "special:bitwarden" then t = w; break end end; if t then local m = t.monitor; local raww = (((m.transform % 2) == 1) and m.height or m.width) / m.scale; local rawh = (((m.transform % 2) == 1) and m.width or m.height) / m.scale; local lw = math.floor(raww + 0.5); local lh = math.floor(rawh + 0.5); local tw = math.floor(lw * 70 / 100 + 0.5); local th = math.floor(lh * 50 / 100 + 0.5); local tx = m.x + math.floor((lw - tw) / 2 + 0.5); local ty = m.y + math.floor((lh - th) / 2 + 0.5); hl.dispatch(hl.dsp.window.resize({ window = t, x = tw, y = th })); hl.dispatch(hl.dsp.window.move({ window = t, x = tx, y = ty })) end' >/dev/null 2>&1 || true
 }
 
 # NOTE: dispatcher form for Hyprland 0.56 Lua engine (legacy
@@ -170,13 +181,16 @@ if [ "$PRESENT" = "0" ]; then
     "$SLEEP" 0.3
   fi
   [ -x "$LAUNCH" ] || die "cannot launch: $LAUNCH is missing or not executable"
-  "$LAUNCH" >/dev/null 2>&1 &
+  # 9>&- closes the flock fd in the child: without it bitwarden-desktop would
+  # INHERIT the lock and hold it forever (caught live: every later toggle
+  # exited instantly via the flock fail-closed guard).
+  "$LAUNCH" >/dev/null 2>&1 9>&- &
   disown || true
-  # Electron cold start measured ~14s on this host: wait up to 20s with ONE
+  # Electron cold start measured 14-25s on this host: wait up to 30s with ONE
   # capped clients read per iteration (worst case ~40 x 1.5s = 60s under a
   # degraded compositor -- the widget watchdog is sized above that).
   local_i=0
-  for ((local_i = 0; local_i < 40; local_i++)); do
+  for ((local_i = 0; local_i < 60; local_i++)); do
     "$SLEEP" 0.5
     eval "$(clients_state)"
     [ "$PRESENT" = "1" ] && break
@@ -185,12 +199,15 @@ if [ "$PRESENT" = "0" ]; then
     # NEVER hard-die here: Bitwarden with "close to tray" keeps running
     # without a mapped window, and a relaunch would do nothing. Warn and
     # succeed -- the README documents disabling close-to-tray.
-    printf 'bitwarden-dropdown: launched %s but no window within 20s (close-to-tray enabled?)\n' "$LAUNCH" >&2
+    printf 'bitwarden-dropdown: launched %s but no window within 30s (close-to-tray enabled?)\n' "$LAUNCH" >&2
     exit 0
   fi
   # Show only if still hidden: a fast window may arrive already visible, and
   # an unconditional show would hide-then-reshow it (flicker).
-  [ "$VISIBLE" = "0" ] && show_ws
+  if [ "$VISIBLE" = "0" ]; then
+    show_ws
+    reassert_geometry
+  fi
 else
   if [ "$WSW" != "none" ] && [ "$WSW" != "special:$WS" ]; then
     pull_into_special
@@ -199,6 +216,7 @@ else
   fi
   if [ "$VISIBLE" = "0" ]; then
     show_ws              # running but hidden -> show
+    reassert_geometry
   else
     hide_ws              # visible -> hide (verified, bounded retries)
   fi
