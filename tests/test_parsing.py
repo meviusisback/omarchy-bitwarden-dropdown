@@ -97,6 +97,18 @@ def make_proc_fixture(root, pid, cmdline, exe="/usr/lib/electron39/electron"):
             os.symlink(exe, exe_path)
 
 
+def _wf(path, text):
+    """Write text to path, closing the handle (avoids ResourceWarning in tests)."""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def _rf(path):
+    """Read path fully, closing the handle."""
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
 class TestExtraction(unittest.TestCase):
     def test_helpers_extracted_nonempty(self):
         self.assertIn("import json", CLIENTS_PY)
@@ -199,6 +211,15 @@ class TestClientMatch(unittest.TestCase):
             make_proc_fixture(root, 4242,
                               b"/usr/lib/electron39/electron /usr/lib/bitwarden/app.asar\x00",
                               exe=None)  # unreadable exe, like the live app
+            out, _ = run_clients([client(pid=4242)], proc_root=root)
+        self.assertEqual(out, "1 3")
+
+    def test_exe_case_insensitive(self):
+        """M4: a genuine CAPITALIZED exe path (/opt/Bitwarden/Bitwarden) must match,
+        not be rejected as a spoof (re-audit case-sensitivity fix)."""
+        with tempfile.TemporaryDirectory() as root:
+            make_proc_fixture(root, 4242, b"/opt/Bitwarden/Bitwarden --app\x00",
+                              exe="/opt/Bitwarden/Bitwarden")
             out, _ = run_clients([client(pid=4242)], proc_root=root)
         self.assertEqual(out, "1 3")
 
@@ -395,6 +416,97 @@ class TestEnvReExec(unittest.TestCase):
             )
         except subprocess.TimeoutExpired:
             self.fail("script looped (re-exec never converged)")
+
+    def test_injected_function_cannot_skip_reexec(self):
+        """M1 function channel: an env-borne BASH_FUNC_* function is invisible to
+        the variable allowlist; the check must still re-exec (env -i strips it)
+        and the imported payload must never run."""
+        env = {
+            "BITWARDEN_DROPDOWN_CLEAN": "1",
+            "PATH": "/usr/bin",
+            "HOME": "/tmp",
+            "XDG_RUNTIME_DIR": "/tmp",
+            "BASH_FUNC_printf%%": "() { echo PWNED_RAN >&2; }",
+        }
+        proc = subprocess.run(
+            ["/usr/bin/bash", "-x", SCRIPT, "status"],
+            capture_output=True, text=True, env=env, timeout=15,
+        )
+        self.assertIn("exec /usr/bin/env -i", proc.stderr)  # re-exec fired
+        self.assertNotIn("PWNED_RAN", proc.stdout + proc.stderr)  # payload never ran
+
+
+class TestLockGuard(unittest.TestCase):
+    """M2 guards: a planted non-regular lock must be refused, never block."""
+
+    def _toggle(self, xd):
+        env = {"PATH": "/usr/bin", "HOME": "/tmp", "XDG_RUNTIME_DIR": xd}
+        return subprocess.run(
+            ["/usr/bin/bash", SCRIPT, "toggle"],
+            capture_output=True, text=True, env=env, timeout=10,
+        )
+
+    def test_fifo_lock_refused_not_hang(self):
+        with tempfile.TemporaryDirectory() as xd:
+            os.mkfifo(os.path.join(xd, "bitwarden-dropdown.lock"))
+            proc = self._toggle(xd)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("refusing non-regular lock", proc.stderr)
+
+    def test_symlink_lock_refused(self):
+        with tempfile.TemporaryDirectory() as xd:
+            victim = os.path.join(xd, "victim")
+            with open(victim, "w") as f:
+                f.write("x")
+            os.symlink(victim, os.path.join(xd, "bitwarden-dropdown.lock"))
+            proc = self._toggle(xd)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("refusing non-regular lock", proc.stderr)
+
+
+class TestFixContract(unittest.TestCase):
+    """Guards the bash/install.sh halves the extracted-helper tests cannot reach
+    (re-audit coverage findings: M3-bash, M5, M6 were unguarded)."""
+
+    def _src(self, name):
+        with open(os.path.join(REPO, name), "r", encoding="utf-8") as h:
+            return h.read()
+
+    def test_m3_bash_die_on_read_error(self):
+        """M3 bash half: initial PRESENT=2 must die; clients_state maps empty AND
+        '2' to error (never absence) — guards the consumer, not just the helper."""
+        src = self._src("bitwarden-dropdown")
+        self.assertIn('if [ "$PRESENT" = "2" ]; then die', src)
+        self.assertIn('""|"2 "*)', src)  # empty output -> err
+
+    def test_m5_install_python_isolated(self):
+        """M5: every python invocation in install.sh must carry -I -E -s."""
+        for line in self._src("install.sh").splitlines():
+            if '"$PYTHON3"' in line:
+                self.assertIn("-I -E -s", line, f"non-isolated python: {line!r}")
+
+    def test_m6_append_block_onofollow_and_newline(self):
+        """M6: the extracted append_block python must refuse a symlink (target
+        untouched) and add a trailing newline byte-wise."""
+        m = re.search(r"append_block\(\) \{.*?<<'PYEOF'\n(.*?)\nPYEOF",
+                      self._src("install.sh"), re.DOTALL)
+        assert m is not None, "append_block heredoc not found"
+        body = m.group(1)
+        with tempfile.TemporaryDirectory() as th:
+            target = os.path.join(th, "t.txt")
+            _wf(target, "orig")
+            link = os.path.join(th, "l.lua")
+            victim = os.path.join(th, "v.txt")
+            _wf(victim, "VICTIM\n")
+            os.symlink(victim, link)
+            r_ok = subprocess.run([PY, "-I", "-E", "-s", "-c", body, target, "A", "B"],
+                                  capture_output=True, text=True)
+            self.assertEqual(r_ok.returncode, 0)
+            self.assertEqual(_rf(target), "orig\nA\nB\n")  # byte-wise newline
+            r_bad = subprocess.run([PY, "-I", "-E", "-s", "-c", body, link, "EVIL"],
+                                   capture_output=True, text=True)
+            self.assertEqual(r_bad.returncode, 1)  # O_NOFOLLOW refused
+            self.assertEqual(_rf(victim), "VICTIM\n")  # untouched
 
 
 if __name__ == "__main__":

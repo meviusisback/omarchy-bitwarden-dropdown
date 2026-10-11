@@ -38,13 +38,21 @@ BW_ENV_ALLOWLIST="BITWARDEN_DROPDOWN_CLEAN HOME XDG_RUNTIME_DIR HYPRLAND_INSTANC
 _bw_clean=0
 if [ "${BITWARDEN_DROPDOWN_CLEAN:-}" = "1" ] && [ "${PATH:-}" = "/usr/bin" ]; then
   _bw_clean=1
+  # An imported function (BASH_FUNC_*%% env entry) is a code-exec channel the
+  # variable allowlist cannot see (compgen -e lists variables only); treat any
+  # imported function as unclean -- env -i strips BASH_FUNC entries, so a fresh
+  # child has none and this check never loops. `builtin` defeats a function-
+  # shadowed compgen (re-audit M1 function-channel bypass).
+  if [ -n "$(builtin compgen -A function || true)" ]; then
+    _bw_clean=0
+  fi
   while IFS= read -r _bw_n; do
     [ -z "$_bw_n" ] && continue
     case " $BW_ENV_ALLOWLIST " in
       *" $_bw_n "*) ;;
       *) _bw_clean=0; break ;;
     esac
-  done < <(compgen -e || true)
+  done < <(builtin compgen -e || true)
 fi
 if [ "$_bw_clean" != "1" ]; then
   exec /usr/bin/env -i \
@@ -120,8 +128,10 @@ for c in data:
             exe = os.readlink("%s/%d/exe" % (proc_root, pid_i))
         except OSError:
             exe = None  # unreadable (sandboxed/dumpable=0): cannot verify here
-        if exe is not None and "electron" not in exe and "bitwarden" not in exe:
-            continue  # readable but wrong binary: definite spoof
+        if exe is not None:
+            exe_l = exe.lower()  # case-insensitive: /opt/Bitwarden/Bitwarden is genuine
+            if "electron" not in exe_l and "bitwarden" not in exe_l:
+                continue  # readable but wrong binary: definite spoof
         with open("%s/%d/cmdline" % (proc_root, pid_i), "rb") as fh:
             cl = fh.read(4096).replace(b"\x00", b" ").lower()
         if b"bitwarden" not in cl:
@@ -160,11 +170,12 @@ print("0")
 PYEOF
 # END PY_SRC
 
-# Bounded compositor read: $1 = deadline seconds, 64KB cap, failures degrade to
-# empty. -k 1 guarantees SIGKILL 1s after SIGTERM so a wedged or SIGTERM-
-# ignoring hyprctl can never outlive the deadline (timeout alone would wait
-# indefinitely). hyprctl is local and normally answers in <100ms; the deadline
-# only exists for a wedged compositor.
+# Bounded compositor read: $1 = deadline seconds, 4MB cap. A read/parse failure
+# surfaces as a distinct error token downstream ('2 err' from clients_state),
+# never as genuine absence. -k 1 guarantees SIGKILL 1s after SIGTERM so a wedged
+# or SIGTERM- ignoring hyprctl can never outlive the deadline (timeout alone
+# would wait indefinitely). hyprctl is local and normally answers in <100ms; the
+# deadline only exists for a wedged compositor.
 hypr_cap() {
   local dl="${1:-2}"; shift
   "$TIMEOUT_BIN" -k 1 "$dl" "$HYPRCTL" "$@" 2>/dev/null | /usr/bin/head -c 4194304
@@ -185,7 +196,7 @@ clients_state() {
   out="${out%%$'\n'*}"
   case "$out" in
     "1 "*) printf '%s\n' "$out" ;;
-    "2 "*) printf '2 err\n' ;;
+    ""|"2 "*) printf '2 err\n' ;;  # empty (interpreter death) != genuine absence
     *) printf '0 none\n' ;;
   esac
 }

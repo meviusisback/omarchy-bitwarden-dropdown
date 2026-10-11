@@ -28,7 +28,7 @@ attivo (lo imposta già il plugin dropdown-terminal), basta anche cliccare fuori
 ## Sicurezza
 
 - Il plugin **non legge** il vault, le password, o la config di Bitwarden — solo
-  lo stato finestra via compositor (`hyprctl`), con output cappato (64KB) e
+  lo stato finestra via compositor (`hyprctl`), con output cappato (4MB) e
   deadline (`timeout -k`).
 - Il toggle gira sotto `env -i` con allowlist esplicita (converge per ogni path
   di invocazione, incluso il keybind), binari assoluti, `python3 -I -E -s`.
@@ -44,7 +44,7 @@ attivo (lo imposta già il plugin dropdown-terminal), basta anche cliccare fuori
   `/usr/bin/bitwarden-desktop`). **Flatpak/AUR**: se usi un'altra installazione,
   cambia `LAUNCH` in cima a `bitwarden-dropdown` e la classe in
   `hypr/bitwarden.lua` se diversa (verificala con `hyprctl clients -j`).
-- **"Close to tray" va disabilitato** in Impostazioni → Behance/App di
+- **"Close to tray" va disabilitato** in Impostazioni → App di
   Bitwarden, altrimenti chiudere la finestra la manda in tray senza mapparla e
   il toggle non la ripristina (esce con un warning non-fatale).
 - Nerd Font per l'icona scudo nella barra
