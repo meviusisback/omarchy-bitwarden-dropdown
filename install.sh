@@ -7,8 +7,9 @@
 # file before the first write (no partial installs), backups + atomic renames
 # preserving mode/owner, exact-line marker removal (no sed regex ranges, strip
 # comparison so an indented marker still matches), grep -qFx -- for whole-line
-# dash-leading markers, trailing-newline guard before append, and ABSOLUTE tool
-# paths so a poisoned PATH at install time cannot hijack the operation.
+# dash-leading markers, O_NOFOLLOW appends that refuse a symlink at OPEN time
+# (no check->write TOCTOU) with a byte-wise trailing-newline guard, and ABSOLUTE
+# tool paths so a poisoned PATH at install time cannot hijack the operation.
 set -euo pipefail
 
 MARKER="meviusisback.bitwarden-dropdown"
@@ -39,7 +40,7 @@ HOOK_DO="do local path = (os.getenv(\"XDG_CONFIG_HOME\") or os.getenv(\"HOME\") 
 # Absolute tool paths (poisoned-PATH hardening, matches the toggle script).
 for _t in /usr/bin/hyprctl /usr/bin/sleep /usr/bin/python3 /usr/bin/bash \
           /usr/bin/dirname /usr/bin/install /usr/bin/cmp /usr/bin/mkdir \
-          /usr/bin/grep /usr/bin/cp /usr/bin/rm /usr/bin/head /usr/bin/tail \
+          /usr/bin/grep /usr/bin/cp /usr/bin/rm /usr/bin/head \
           /usr/bin/timeout; do
   [ -x "$_t" ] || die "missing trusted tool: $_t"
 done
@@ -61,18 +62,34 @@ refuse_link() {
   [ ! -L "$d" ] || die "refusing to write into $d: it is a symlink"
 }
 
-# Ensure the file ends with a newline before we append a block (otherwise the
-# BEGIN marker glues onto the last line and uninstall can never match it).
-# Tests the LAST byte: `tail -c1` prints nothing (empty) iff the file already
-# ends with a newline.
-ensure_trailing_newline() {
-  local f="$1"
-  [ -s "$f" ] || return 0
-  [ -z "$(/usr/bin/tail -c 1 "$f")" ] || printf '\n' >> "$f"
+# Append fixed lines to a config. Refuses symlinks at OPEN time (O_NOFOLLOW
+# makes a swapped-in symlink an open failure, not a redirected write -- this
+# closes the check->write TOCTOU window, M6) and guarantees a trailing newline
+# byte-wise (NUL-safe), replacing the old ensure_trailing_newline helper. Isolated
+# python (-I -E -s) so no PYTHONPATH/usercustomize code can run at install time.
+append_block() {
+  local path="$1"; shift
+  "$PYTHON3" -I -E -s - "$path" "$@" <<'PYEOF'
+import os, sys
+path, lines = sys.argv[1], sys.argv[2:]
+try:
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_CREAT, 0o644)
+except OSError as e:
+    print(f"Error: refusing to append to {path}: {e}", file=sys.stderr)
+    raise SystemExit(1)
+with os.fdopen(fd, "r+b", buffering=0) as h:
+    h.seek(0, os.SEEK_END)
+    end = h.tell()
+    if end > 0:
+        h.seek(end - 1)
+        if h.read(1) != b"\n":
+            h.write(b"\n")
+    for l in lines:
+        h.write(l.encode("utf-8", "surrogateescape") + b"\n")
+PYEOF
 }
 
 do_install() {
-  "$PYTHON3" -m py_compile /dev/null 2>/dev/null || true  # no-op; python present
   /usr/bin/bash -n "$REPO_DIR/bitwarden-dropdown" || die "toggle script has syntax errors"
   # Pre-check everything first: a missing config must abort BEFORE partial writes.
   for f in "$HYPR_LUA" "$BIND_LUA"; do
@@ -90,18 +107,16 @@ do_install() {
   # destination symlink was already refused above.
   [ -e "$HYPR_LUA.bak" ] || /usr/bin/cp -p "$HYPR_LUA" "$HYPR_LUA.bak"
   [ -e "$BIND_LUA.bak" ] || /usr/bin/cp -p "$BIND_LUA" "$BIND_LUA.bak"
-  ensure_trailing_newline "$HYPR_LUA"
-  ensure_trailing_newline "$BIND_LUA"
   # Whole-line marker match (-x): a stray mention inside a comment/string must
   # not suppress re-adding the block forever.
   if ! /usr/bin/grep -qFx -- "$HOOK_LINE" "$HYPR_LUA"; then
-    printf '%s\n%s\n' "$HOOK_LINE" "$HOOK_DO" >> "$HYPR_LUA"
+    append_block "$HYPR_LUA" "$HOOK_LINE" "$HOOK_DO"
     msg "hook added to hyprland.lua"
   else
     msg "hook already present"
   fi
   if ! /usr/bin/grep -qFx -- "$BIND_BEGIN" "$BIND_LUA"; then
-    printf '%s\n%s\n%s\n' "$BIND_BEGIN" "$BIND_LINE" "$BIND_END" >> "$BIND_LUA"
+    append_block "$BIND_LUA" "$BIND_BEGIN" "$BIND_LINE" "$BIND_END"
     msg "keybind added to bindings.lua"
   else
     msg "keybind already present"
@@ -136,7 +151,7 @@ do_uninstall() {
   # Marker validation + config rewrite FIRST (atomic, mode-preserving), so an
   # unterminated/indented marker block aborts BEFORE we delete the binary (no
   # half-uninstalled state pointing at a missing executable).
-  "$PYTHON3" - "$BIND_LUA" "$HYPR_LUA" <<'PYEOF'
+  "$PYTHON3" -I -E -s - "$BIND_LUA" "$HYPR_LUA" <<'PYEOF'
 import os, sys
 bind_path, hook_path = sys.argv[1], sys.argv[2]
 

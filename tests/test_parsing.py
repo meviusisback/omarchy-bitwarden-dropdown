@@ -5,8 +5,8 @@ Extracts CLIENTS_PY and MONITORS_PY verbatim from the real `bitwarden-dropdown`
 script (between the PYEOF heredoc marks) and drives them with fixture JSON on
 stdin — no compositor, no network, no Bitwarden app. Stdlib only.
 
-The class-spoof guard reads /proc/<pid>/cmdline; tests point PROC_ROOT at a
-temp fixture tree so it stays hermetic.
+The class-spoof guard reads /proc/<pid>/exe (identity) and /proc/<pid>/cmdline;
+tests point PROC_ROOT at a temp fixture tree so it stays hermetic.
 
 Run:  python3 -m unittest discover -s tests -v
 """
@@ -81,12 +81,20 @@ def monitor(active="3", special_id=0, special_name="", **extra):
     return m
 
 
-def make_proc_fixture(root, pid, cmdline):
-    """Create /<root>/<pid>/cmdline with NUL-separated bytes (like the real proc)."""
+def make_proc_fixture(root, pid, cmdline, exe="/usr/lib/electron39/electron"):
+    """Create /<root>/<pid>/cmdline (NUL-separated) and an exe symlink, like the
+    real proc. `exe` defaults to the genuine launcher; M4's identity check reads
+    it, so tests that expect a match must point it at an electron/bitwarden path.
+    Pass exe=None to create NO exe (simulating the real app's unreadable,
+    Chromium-sandboxed /proc/<pid>/exe, which defers to the cmdline check)."""
     d = os.path.join(root, str(pid))
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, "cmdline"), "wb") as h:
         h.write(cmdline)
+    if exe is not None:
+        exe_path = os.path.join(d, "exe")
+        if not os.path.lexists(exe_path):
+            os.symlink(exe, exe_path)
 
 
 class TestExtraction(unittest.TestCase):
@@ -175,6 +183,25 @@ class TestClientMatch(unittest.TestCase):
             out, _ = run_clients([client(pid=5555)], proc_root=root)
         self.assertEqual(out, "0 none")
 
+    def test_exe_identity_spoof_rejected(self):
+        """M4: class=Bitwarden + 'bitwarden' in argv but the exe is a DIFFERENT
+        binary -> rejected (argv-substring spoofing no longer passes)."""
+        with tempfile.TemporaryDirectory() as root:
+            make_proc_fixture(root, 7777, b"/usr/bin/evil --bitwarden-helper\x00",
+                              exe="/usr/bin/evil")
+            out, _ = run_clients([client(pid=7777)], proc_root=root)
+        self.assertEqual(out, "0 none")
+
+    def test_sandboxed_unreadable_exe_matches(self):
+        """M4 must NOT reject the real app: its Chromium-sandboxed /proc/<pid>/exe
+        is EACCES (no exe symlink in the fixture), so identity defers to cmdline."""
+        with tempfile.TemporaryDirectory() as root:
+            make_proc_fixture(root, 4242,
+                              b"/usr/lib/electron39/electron /usr/lib/bitwarden/app.asar\x00",
+                              exe=None)  # unreadable exe, like the live app
+            out, _ = run_clients([client(pid=4242)], proc_root=root)
+        self.assertEqual(out, "1 3")
+
     def test_other_class_ignored(self):
         with tempfile.TemporaryDirectory() as root:
             make_proc_fixture(root, 4242, b"/usr/lib/electron39/electron /usr/lib/bitwarden/app.asar\x00")
@@ -194,12 +221,12 @@ class TestHostileFixtures(unittest.TestCase):
     def test_garbage_json(self):
         out, rc = run_clients("not json {{{")
         self.assertEqual(rc, 0)
-        self.assertEqual(out, "0 none")
+        self.assertEqual(out, "2 err")  # M3: parse failure != genuine absence
 
     def test_non_list_json(self):
-        """A JSON object (wrong root type) must fail closed, not crash."""
+        """A JSON object (wrong root type) must signal error, not absence (M3)."""
         out, _ = run_clients({"class": "Bitwarden"})
-        self.assertEqual(out, "0 none")
+        self.assertEqual(out, "2 err")
 
     def test_non_dict_entries(self):
         with tempfile.TemporaryDirectory() as root:
@@ -336,6 +363,38 @@ class TestMonitorsVisibility(unittest.TestCase):
         NOT read as VISIBLE=1 (round-2 symmetry fix)."""
         out, _ = run_monitors([monitor(special_id=0, special_name="")], wsfull="")
         self.assertEqual(out, "0")
+
+
+class TestEnvReExec(unittest.TestCase):
+    """M1: the re-exec decision is a positive allowlist check on env CONTENT,
+    not the forgeable marker alone."""
+
+    def test_forged_marker_cannot_skip_reexec(self):
+        """A pre-set marker + PATH must NOT skip the re-exec when a hijack
+        variable (LD_PRELOAD) is present — env -i strips it (M1)."""
+        env = {
+            "BITWARDEN_DROPDOWN_CLEAN": "1",
+            "PATH": "/usr/bin",
+            "LD_PRELOAD": "/nonexistent-evil.so",
+            "HOME": "/tmp",
+        }
+        proc = subprocess.run(
+            ["/usr/bin/bash", "-x", SCRIPT, "status"],
+            capture_output=True, text=True, env=env, timeout=15,
+        )
+        self.assertIn("exec /usr/bin/env -i", proc.stderr)
+
+    def test_no_infinite_reexec_loop(self):
+        """The script must terminate (one re-exec max), not loop forever. A
+        loop is detected by the subprocess timeout."""
+        env = {"PATH": "/usr/bin", "HOME": "/tmp", "XDG_RUNTIME_DIR": "/tmp"}
+        try:
+            subprocess.run(
+                ["/usr/bin/bash", SCRIPT, "status"],
+                capture_output=True, text=True, env=env, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("script looped (re-exec never converged)")
 
 
 if __name__ == "__main__":

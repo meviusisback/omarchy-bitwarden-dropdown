@@ -21,10 +21,32 @@ LAUNCH="/usr/bin/bitwarden-desktop"   # pacman bitwarden package; absolute path,
 # with the FULL session environment, where a hostile PATH/LD_PRELOAD/
 # PYTHONPATH/PYTHONHOME could redirect execution. Re-exec ONCE under env -i
 # with an explicit allowlist so every invocation path (widget, keybind, manual)
-# runs identically and hermetically. The marker prevents an infinite loop.
-# Residual: values we pass through are visible in /proc cmdline to local users;
-# the runtime socket dir (0700) is the real boundary, and no secrets pass here.
-if [ "${BITWARDEN_DROPDOWN_CLEAN:-}" != "1" ] || [ "${PATH:-}" != "/usr/bin" ]; then
+# runs identically and hermetically. Whether to re-exec is decided by a POSITIVE
+# allowlist check on the env CONTENT below -- not by the marker alone, which a
+# caller could forge. Residual: values we pass through are visible in /proc
+# cmdline to local users; the runtime socket dir (0700) is the real boundary,
+# and no secrets pass here.
+# Positive hermeticity check: the environment is "clean" ONLY if the marker is
+# set AND PATH is normalized AND every exported variable name is on the
+# allowlist. A forgeable marker alone can no longer skip this -- a caller who
+# pre-sets the marker + PATH but leaves a hijack variable (LD_PRELOAD,
+# PYTHONPATH, or any unknown one) fails the allowlist and is re-exec'd under
+# env -i, which strips it. The allowlist covers exactly what env -i passes plus
+# the vars bash itself re-exports (PWD/SHLVL/_/OLDPWD), so the child always
+# passes and the re-exec fires at most once (no loop).
+BW_ENV_ALLOWLIST="BITWARDEN_DROPDOWN_CLEAN HOME XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY DISPLAY DBUS_SESSION_BUS_ADDRESS LANG LC_ALL PATH PWD OLDPWD SHLVL _"
+_bw_clean=0
+if [ "${BITWARDEN_DROPDOWN_CLEAN:-}" = "1" ] && [ "${PATH:-}" = "/usr/bin" ]; then
+  _bw_clean=1
+  while IFS= read -r _bw_n; do
+    [ -z "$_bw_n" ] && continue
+    case " $BW_ENV_ALLOWLIST " in
+      *" $_bw_n "*) ;;
+      *) _bw_clean=0; break ;;
+    esac
+  done < <(compgen -e || true)
+fi
+if [ "$_bw_clean" != "1" ]; then
   exec /usr/bin/env -i \
     BITWARDEN_DROPDOWN_CLEAN=1 \
     HOME="${HOME:-}" \
@@ -57,7 +79,7 @@ FLOCK=/usr/bin/flock
 # Both Python helpers below are extracted verbatim by tests/test_parsing.py --
 # keep the PYEOF markers and the code shape stable.
 
-# CLIENTS_PY: stdin = hyprctl clients -j JSON (already 64KB-capped upstream).
+# CLIENTS_PY: stdin = hyprctl clients -j JSON (already 4MB-capped upstream).
 # stdout = "<PRESENT> <WSW>" two whitespace-safe tokens, consumed by `read`
 # (NEVER eval -- a compositor workspace NAME is attacker-influenceable and must
 # not be re-parsed as shell). WSW is charset-validated before it is emitted.
@@ -75,9 +97,9 @@ def safe_wsw(w):
 try:
     data = json.load(sys.stdin)
 except Exception:
-    print("0 none"); raise SystemExit
+    print("2 err"); raise SystemExit  # M3: truncated/parse failure != genuine absence
 if not isinstance(data, list):
-    print("0 none"); raise SystemExit
+    print("2 err"); raise SystemExit  # M3: malformed root != genuine absence
 for c in data:
     if not isinstance(c, dict):
         continue
@@ -88,6 +110,18 @@ for c in data:
         pid_i = int(pid)
         if pid_i <= 1:
             continue  # fail closed: a bogus pid must not fall through to trust class
+        # Exe identity (M4): the real app is Chromium-sandboxed (non-dumpable),
+        # so /proc/<pid>/exe is EACCES even for same-UID. An UNREADABLE exe
+        # therefore defers to the cmdline check below; only a READABLE
+        # wrong-binary exe is a definite spoof (a dumpable class-spoof with
+        # 'bitwarden' planted in argv is rejected here). Defense-in-depth;
+        # same-UID threat.
+        try:
+            exe = os.readlink("%s/%d/exe" % (proc_root, pid_i))
+        except OSError:
+            exe = None  # unreadable (sandboxed/dumpable=0): cannot verify here
+        if exe is not None and "electron" not in exe and "bitwarden" not in exe:
+            continue  # readable but wrong binary: definite spoof
         with open("%s/%d/cmdline" % (proc_root, pid_i), "rb") as fh:
             cl = fh.read(4096).replace(b"\x00", b" ").lower()
         if b"bitwarden" not in cl:
@@ -100,7 +134,7 @@ for c in data:
 print("0 none")
 PYEOF
 
-# MONITORS_PY: stdin = hyprctl monitors -j JSON (already 64KB-capped upstream).
+# MONITORS_PY: stdin = hyprctl monitors -j JSON (already 4MB-capped upstream).
 # stdout = "0" or "1". VISIBLE is decided STRUCTURALLY: a special workspace is
 # shown iff some monitor's specialWorkspace.name == our WSFULL. A workspace
 # renamed to 'special:bitwarden' lands in activeWorkspace.name, NOT
@@ -133,7 +167,7 @@ PYEOF
 # only exists for a wedged compositor.
 hypr_cap() {
   local dl="${1:-2}"; shift
-  "$TIMEOUT_BIN" -k 1 "$dl" "$HYPRCTL" "$@" 2>/dev/null | /usr/bin/head -c 65536
+  "$TIMEOUT_BIN" -k 1 "$dl" "$HYPRCTL" "$@" 2>/dev/null | /usr/bin/head -c 4194304
 }
 
 # PRESENT + the window's workspace in ONE capped clients read. Output exactly
@@ -141,13 +175,17 @@ hypr_cap() {
 # FIRST line, then validate to the expected shape, so a pipefail-triggered
 # pipeline (hyprctl nonzero while python still printed) can never stack a
 # second fallback line onto the result (caught in round 2: `0\n0` broke the
-# exact-match consumers). Any failure -> "0 none".
+# exact-match consumers). Output is a 3-state contract: "1 <ws>" (present),
+# "0 none" (genuinely absent), "2 err" (read/parse failure -- the caller must
+# NOT treat this as absence, which is what made a truncated JSON relaunch a
+# running app, M3).
 clients_state() {
   local out
   out="$(hypr_cap 1 clients -j | APP="$APP_CLASS" PROC_ROOT="${PROC_ROOT:-/proc}" "$PYTHON3" -I -E -s -c "$CLIENTS_PY" 2>/dev/null || true)"
   out="${out%%$'\n'*}"
   case "$out" in
     "1 "*) printf '%s\n' "$out" ;;
+    "2 "*) printf '2 err\n' ;;
     *) printf '0 none\n' ;;
   esac
 }
@@ -237,11 +275,20 @@ esac
 [ -n "${XDG_RUNTIME_DIR:-}" ] || die "XDG_RUNTIME_DIR unset"
 [ -d "$XDG_RUNTIME_DIR" ] || die "XDG_RUNTIME_DIR not a directory"
 LOCK="$XDG_RUNTIME_DIR/bitwarden-dropdown.lock"
-[ ! -L "$LOCK" ] || die "refusing symlink lock: $LOCK"
+# M2: reject symlinks AND non-regular files. A planted FIFO lets `[ ! -L ]`
+# pass and then blocks `exec 9>>` forever (one parked process per keybind);
+# `[ -f ] && [ ! -L ]` accepts only a regular non-symlink, refusing both.
+if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
+  [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || die "refusing non-regular lock: $LOCK"
+fi
 exec 9>>"$LOCK" || die "cannot open lock: $LOCK"
 $FLOCK -n 9 || exit 0
 
 read -r PRESENT WSW < <(clients_state 9>&-) || { PRESENT=0; WSW=none; }
+# M3: a failed read (PRESENT=2) must NOT be read as "absent" -- that would take
+# the launch branch and relaunch a running app. Refuse to act (exit 1, clear
+# error) and let the next toggle retry instead.
+if [ "$PRESENT" = "2" ]; then die "compositor read failed (truncated or malformed)"; fi
 VISIBLE="$(visible_now)"
 
 if [ "$PRESENT" = "0" ]; then
@@ -269,10 +316,10 @@ if [ "$PRESENT" = "0" ]; then
     read -r PRESENT WSW < <(clients_state 9>&-) || { PRESENT=0; WSW=none; }
     [ "$PRESENT" = "1" ] && break
   done
-  if [ "$PRESENT" = "0" ]; then
-    # NEVER hard-die here: Bitwarden with "close to tray" keeps running
-    # without a mapped window, and a relaunch would do nothing. Warn and
-    # succeed -- the README documents disabling close-to-tray.
+  # After the wait loop, anything other than a confirmed "1" (absent OR read
+  # failure PRESENT=2) means we never saw a window: never hard-die (a relaunch
+  # of a running app does nothing), warn and succeed.
+  if [ "$PRESENT" != "1" ]; then
     printf 'bitwarden-dropdown: launched %s but no window within 30s (close-to-tray enabled?)\n' "$LAUNCH" >&2
     exit 0
   fi

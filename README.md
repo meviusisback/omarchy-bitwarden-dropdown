@@ -54,6 +54,7 @@ attivo (lo imposta già il plugin dropdown-terminal), basta anche cliccare fuori
 ```bash
 omarchy plugin add https://github.com/meviusisback/omarchy-bitwarden-dropdown.git
 omarchy plugin enable meviusisback.bitwarden
+cd ~/.config/omarchy/plugins/meviusisback.bitwarden
 ./install.sh
 ```
 
@@ -70,6 +71,7 @@ Poi posiziona il widget: `omarchy bar put meviusisback.bitwarden --section right
 ## Removal
 
 ```bash
+cd ~/.config/omarchy/plugins/meviusisback.bitwarden
 ./install.sh uninstall
 omarchy plugin disable meviusisback.bitwarden
 omarchy plugin remove meviusisback.bitwarden
