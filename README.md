@@ -3,6 +3,10 @@
 Bitwarden vero (app desktop) come dropdown in sovraimpressione: icona scudo
 sulla barra oppure `SUPER + SHIFT + B` per mostrarla/nasconderla ovunque tu sia.
 
+## Screenshot
+
+![Bitwarden dropdown infographic](bitwarden-dropdown-infographic.png)
+
 ## Come funziona
 
 - Widget barra (`BarWidget.qml`, plugin `meviusisback.bitwarden`): bottone scudo,
