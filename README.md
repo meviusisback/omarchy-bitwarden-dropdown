@@ -2,7 +2,7 @@
 
 # Bitwarden dropdown
 
-**La vera app desktop di Bitwarden come dropdown in sovraimpressione: icona scudo sulla barra e toggle con `SUPER + SHIFT + B` ovunque tu sia.**
+**The real Bitwarden desktop app as an overlay dropdown: shield icon in the bar and `SUPER + SHIFT + B` toggle from anywhere.**
 
 [![Release](https://img.shields.io/github/v/release/meviusisback/omarchy-bitwarden-dropdown)](https://github.com/meviusisback/omarchy-bitwarden-dropdown/releases)
 [![License: MIT](https://img.shields.io/github/license/meviusisback/omarchy-bitwarden-dropdown)](LICENSE)
@@ -12,29 +12,29 @@
 
 </div>
 
-## Perché esiste
+## Why it exists
 
-Il password manager serve ovunque, ma aprire la sua finestra spezza il flusso:
-workspace occupato, focus perso, finestra da richiudere. Questo plugin tratta
-l'app ufficiale di Bitwarden come un dropdown: una pressione di tasti e compare
-sopra quello che stai facendo, un'altra e sparisce. Login, sync e ricerca
-restano nell'app ufficiale — niente CLI, niente token di sessione nel plugin.
+You need your password manager everywhere, but opening its window breaks the flow:
+occupied workspace, lost focus, a window to close again. This plugin treats the
+official Bitwarden app as a dropdown: one keypress and it appears over what you
+are doing, another and it is gone. Login, sync and search stay in the official
+app — no CLI, no session token in the plugin.
 
-## Cosa fa
+## What it does
 
-- **Widget barra** (`BarWidget.qml`, plugin `meviusisback.bitwarden`): bottone
-  scudo, click = toggle, stato rilevato ogni 2 s. Non tocca segreti: legge solo
-  `VISIBLE=0/1` e non logga mai l'output raw.
-- **Dropdown su special workspace**: la finestra di Bitwarden vive nascosta e
-  appare in sovraimpressione quando la chiami, da qualunque workspace.
-- **Keybind globale `SUPER + SHIFT + B`** → `~/.local/bin/bitwarden-dropdown toggle`.
-- **Chiusura semplice**: premi di nuovo `SUPER + SHIFT + B`. Se hai
-  `special_fallthrough` attivo (lo imposta già il plugin dropdown-terminal),
-  basta anche cliccare fuori.
-- **Nessun segreto toccato**: login e vault restano nell'app di Bitwarden. Lo
-  script chiede solo al compositor se la finestra esiste e la sua posizione.
+- **Bar widget** (`BarWidget.qml`, plugin `meviusisback.bitwarden`): shield
+  button, click = toggle, state probed every 2 s. It never touches secrets: it
+  only reads `VISIBLE=0/1` and never logs raw output.
+- **Dropdown on a special workspace**: the Bitwarden window lives hidden and
+  appears as an overlay when you call it, from any workspace.
+- **Global keybind `SUPER + SHIFT + B`** → `~/.local/bin/bitwarden-dropdown toggle`.
+- **Simple close**: press `SUPER + SHIFT + B` again. If you have
+  `special_fallthrough` enabled (already set by the dropdown-terminal plugin),
+  just clicking outside is enough.
+- **No secrets touched**: login and vault stay in the Bitwarden app. The
+  script only asks the compositor whether the window exists and where it is.
 
-## Installazione
+## Install
 
 ```bash
 omarchy plugin add https://github.com/meviusisback/omarchy-bitwarden-dropdown.git
@@ -43,83 +43,84 @@ cd ~/.config/omarchy/plugins/meviusisback.bitwarden
 ./install.sh
 ```
 
-`install.sh` è idempotente (blocchi marcati, mai duplicati) e installa solo
-regola finestra + keybind:
+`install.sh` is idempotent (marked blocks, never duplicated) and only installs
+the window rule + keybind:
 
-1. copia `bitwarden-dropdown` in `~/.local/bin/` (modo 755, verificato con `cmp`)
-2. copia `hypr/bitwarden.lua` in `~/.config/hypr/`
-3. aggiunge l'hook di caricamento in `~/.config/hypr/hyprland.lua`
-4. aggiunge il keybind `SUPER + SHIFT + B` in `~/.config/hypr/bindings.lua`
-5. `hyprctl reload` + controllo `hyprctl configerrors` + assert 1 solo bind
+1. copies `bitwarden-dropdown` to `~/.local/bin/` (mode 755, verified with `cmp`)
+2. copies `hypr/bitwarden.lua` to `~/.config/hypr/`
+3. adds the load hook to `~/.config/hypr/hyprland.lua`
+4. adds the `SUPER + SHIFT + B` keybind to `~/.config/hypr/bindings.lua`
+5. `hyprctl reload` + `hyprctl configerrors` check + assert of exactly 1 bind
 
-Poi posiziona il widget: `omarchy bar put meviusisback.bitwarden --section right`.
+Then place the widget: `omarchy bar put meviusisback.bitwarden --section right`.
 
-## Utilizzo
+## Usage
 
-- `SUPER + SHIFT + B` ovunque: se l'app gira nascosta la mostra, se visibile
-  la nasconde, se non gira la lancia.
-- Click sullo scudo nella barra: stessa cosa.
-- Per chiudere: di nuovo `SUPER + SHIFT + B`, oppure click fuori se hai
-  `special_fallthrough` attivo.
+- `SUPER + SHIFT + B` anywhere: if the app runs hidden it shows it, if visible
+  it hides it, if not running it launches it.
+- Click the shield in the bar: same thing.
+- To close: `SUPER + SHIFT + B` again, or click outside if you have
+  `special_fallthrough` enabled.
 
-## Requisiti
+## Requirements
 
-- Omarchy con Hyprland 0.56+ (sintassi dispatcher Lua)
-- App desktop Bitwarden installata (`bitwarden` da pacman, comando
-  `/usr/bin/bitwarden-desktop`). **Flatpak/AUR**: se usi un'altra
-  installazione, cambia `LAUNCH` in cima a `bitwarden-dropdown` e la classe in
-  `hypr/bitwarden.lua` se diversa (verificala con `hyprctl clients -j`).
-- **"Close to tray" va disabilitato** in Impostazioni → App di Bitwarden,
-  altrimenti chiudere la finestra la manda in tray senza mapparla e il toggle
-  non la ripristina (esce con un warning non-fatale).
-- Nerd Font per l'icona scudo nella barra
+- Omarchy with Hyprland 0.56+ (Lua dispatcher syntax)
+- Bitwarden desktop app installed (`bitwarden` from pacman, command
+  `/usr/bin/bitwarden-desktop`). **Flatpak/AUR**: if you use another
+  installation, change `LAUNCH` at the top of `bitwarden-dropdown` and the class
+  in `hypr/bitwarden.lua` if different (check it with `hyprctl clients -j`).
+- **"Close to tray" must be disabled** in Bitwarden Settings → App,
+  otherwise closing the window sends it to the tray without mapping and the
+  toggle cannot restore it (it exits with a non-fatal warning).
+- Nerd Font for the shield icon in the bar
 
-## Configurazione
+## Configuration
 
-- Keybind `SUPER + SHIFT + B` (default da manifest): vive in
-  `~/.config/hypr/bindings.lua`, installato da `install.sh`.
-- Comando di lancio: variabile `LAUNCH` in cima a `bitwarden-dropdown`
+- Keybind `SUPER + SHIFT + B` (manifest default): lives in
+  `~/.config/hypr/bindings.lua`, installed by `install.sh`.
+- Launch command: `LAUNCH` variable at the top of `bitwarden-dropdown`
   (default `/usr/bin/bitwarden-desktop`).
-- Classe finestra: `hypr/bitwarden.lua` (default `Bitwarden`, match
-  case-insensitive).
+- Window class: `hypr/bitwarden.lua` (default `Bitwarden`,
+  case-insensitive match).
 
-## Come funziona
+## How it works
 
-- `hypr/bitwarden.lua` — regola finestra: la classe `Bitwarden` va su
-  `special:bitwarden`, flottante, centrata sotto la barra. La dimensione NON è
-  forzata: è l'app Bitwarden a decidere la size e adattare il layout (forzare
-  una box fissa 70%x50% tagliava il contenuto in basso).
-- `bitwarden-dropdown` — script di toggle: se l'app gira nascosta la mostra,
-  se visibile la nasconde, se non gira la lancia (`/usr/bin/bitwarden-desktop`,
-  pacman). Usa la sintassi dispatcher Lua di Hyprland 0.56
-  (`hl.dsp.workspace.toggle_special`); quella legacy `togglespecialworkspace`
-  su questa build fallisce in silenzio.
-- Sicurezza: il plugin **non legge** il vault, le password o la config di
-  Bitwarden — solo lo stato finestra via compositor (`hyprctl`), con output
-  cappato (4 MB) e deadline (`timeout -k`). Il toggle gira sotto `env -i` con
-  allowlist esplicita (converge per ogni path di invocazione, incluso il
-  keybind), binari assoluti, `python3 -I -E -s`. Il match della finestra è su
-  `class` (case-insensitive) **e** verifica che `/proc/<pid>/cmdline` menzioni
-  `bitwarden` (difende da class-spoof); `VISIBLE` è deciso strutturalmente da
-  `specialWorkspace.name` (difende da rename-spoof). `flock` single-flight sul
-  toggle (il keybind gira fuori dal processo QML).
-- Differenza dal resto del marketplace: l'Omarchy marketplace ha già
-  `io.github.elevate08.qs-bitwarden-cli` e `com.aktivesolutions.bw-vault`
-  (bw CLI, verificato). Questo plugin è l'unico che tratta **l'app GUI di
-  Bitwarden come dropdown** (stesso pattern del plugin Ente Auth).
+- `hypr/bitwarden.lua` — window rule: the `Bitwarden` class goes to
+  `special:bitwarden`, floating, centered under the bar. The size is NOT
+  forced: the Bitwarden app decides its size and adapts the layout (forcing a
+  fixed 70%x50% box cut off the content at the bottom).
+- `bitwarden-dropdown` — toggle script: if the app runs hidden it shows it,
+  if visible it hides it, if not running it launches it
+  (`/usr/bin/bitwarden-desktop`, pacman). It uses the Hyprland 0.56 Lua
+  dispatcher syntax (`hl.dsp.workspace.toggle_special`); the legacy
+  `togglespecialworkspace` fails silently on this build.
+- Security: the plugin **never reads** the Bitwarden vault, passwords or
+  config — only window state via the compositor (`hyprctl`), with capped
+  output (4 MB) and a deadline (`timeout -k`). The toggle runs under `env -i`
+  with an explicit allowlist (converged for every invocation path, including
+  the keybind), absolute binaries, `python3 -I -E -s`. Window matching is on
+  `class` (case-insensitive) **and** verifies that `/proc/<pid>/cmdline`
+  mentions `bitwarden` (defends against class-spoof); `VISIBLE` is decided
+  structurally from `specialWorkspace.name` (defends against rename-spoof).
+  `flock` single-flight on the toggle (the keybind runs outside the QML
+  process).
+- Difference from the rest of the marketplace: the Omarchy marketplace already
+  has `io.github.elevate08.qs-bitwarden-cli` and `com.aktivesolutions.bw-vault`
+  (bw CLI, verified). This plugin is the only one that treats **the Bitwarden
+  GUI app as a dropdown** (same pattern as the Ente Auth plugin).
 
-Test (suite ermetica: stdlib, niente compositor/rete — estrae gli helper Python
-dallo script reale e li guida con fixture JSON):
+Tests (hermetic suite: stdlib, no compositor/network — extracts the real
+Python helpers from the script and drives them with JSON fixtures):
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-Copre match di classe, charset-validation del workspace name, class-spoof via
-/proc, parse strutturale di visibilità, rename-spoof e fixture ostili
+Covers class matching, charset-validation of the workspace name, class-spoof
+via /proc, structural visibility parsing, rename-spoof and hostile fixtures
 (garbage, oversized, unicode).
 
-## Rimozione
+## Removal
 
 ```bash
 cd ~/.config/omarchy/plugins/meviusisback.bitwarden
@@ -128,9 +129,9 @@ omarchy plugin disable meviusisback.bitwarden
 omarchy plugin remove meviusisback.bitwarden
 ```
 
-Rimuove script, regola, hook e keybind, poi `hyprctl reload`. Resta solo un
-backup `*.bak` se creato (cancellalo a mano se non serve).
+Removes script, rule, hook and keybind, then `hyprctl reload`. Only a `*.bak`
+backup remains if one was created (delete it by hand if unneeded).
 
-## Licenza
+## License
 
-MIT — vedi [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
